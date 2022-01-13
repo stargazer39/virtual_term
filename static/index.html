@@ -12,7 +12,22 @@
                 height: 500px;
                 width: 100vw;
             }
-            textarea { white-space: nowrap; }
+            textarea { white-space: pre-wrap; }
+            #active-instances {
+                width: 100%;
+                padding-left: 10px;
+                padding-right: 10px;
+            }
+            #active-instances > div {
+                display: flex;
+                flex-direction: row;
+                width: 100%;
+            }
+            
+            .spacer {
+                flex-grow: 1;
+                flex-shrink: 0;
+            }
         </style>
     </head>
     <body>
@@ -26,6 +41,8 @@
             <button id="stop-term">Stop</button>
             <input type="text" id="command" placeholder="Command">
             <button id="send-term" onclick="sendCommand()">Send</button>
+            <br><br>
+            <div id="active-instances">Active Terminals : <br><br></div>
         </div>
         <script>
             let ws = null
@@ -35,9 +52,12 @@
             let termArea = $("#term-area")
             let loginBtn = $("#login")
             let startBtn = $("#start-term")
+            let activeTerms = $("#active-instances")
             let currentUUID = ""
 
             let termOpen = false
+
+            updateTerm()
 
             loginBtn.click(() => {
                 $.ajax({
@@ -46,6 +66,7 @@
                     dataType: "json"
                 }).then((d) => {
                     console.log(d)
+                    updateTerm()
                 }).catch((d) => {
                     console.log(d)
                 })
@@ -107,6 +128,7 @@
                                 "c": "t"
                             }));
                             onConnect()
+                            termArea.val("")
                             break;
                         case "t":
                             termArea.val(termArea.val() + res.m)
@@ -148,6 +170,23 @@
                     ws.send(JSON.stringify({ "c" : "r", "m" : commadLine.val() + "\n" }));
                     commadLine.val("")
                 }
+            }
+            function updateTerm() {
+                $.ajax({
+                    url:"/api/term/list",
+                    method:"get",
+                }).then((d) => {
+                    console.log(d)
+                    if(d.success){
+                        for(let t of d.data){
+                            let elem = $(`<div><span>${t}</span><div class="spacer"></div><button onclick="startSocket('${t}')">Set</button></div>`)
+                            activeTerms.append(elem)
+                        }
+                    }
+                }).catch((d) => {
+                    console.log(d)
+                })
+                activeTerms.append
             }
         </script>
     </body>

@@ -37,6 +37,13 @@ func SendSuccessMessage(m string) gin.H {
 	}
 }
 
+func ActiveTerminals(s []string) gin.H {
+	return gin.H{
+		"success": true,
+		"data":    s,
+	}
+}
+
 // WebSocket modal
 type WsCommand struct {
 	Command string `json:"c"` // command

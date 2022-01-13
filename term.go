@@ -19,8 +19,10 @@ type Terminal struct {
 	stdout    *os.File
 	output    *os.File
 	stdinChan chan string
-	stdinErr  chan error
-	process   *exec.Cmd
+	/* 	stdinErr   chan error */
+	closeEvent chan error
+	process    *exec.Cmd
+	Running    bool
 }
 
 func NewTerminal(title string, args ...string) *Terminal {
@@ -34,8 +36,9 @@ func NewTerminal(title string, args ...string) *Terminal {
 		title:     title,
 		process:   cmd,
 		stdinChan: make(chan string),
-		stdinErr:  make(chan error),
-		id:        uuid.New(),
+		/* stdinErr:  make(chan error), */
+		id:      uuid.New(),
+		Running: false,
 	}
 }
 
@@ -91,7 +94,7 @@ func (t *Terminal) Start() error {
 			for {
 				c := <-t.stdinChan
 				_, wErr := bufStdin.WriteString(c + "\n")
-				t.stdinErr <- wErr
+				/* t.stdinErr <- wErr */
 				if wErr != nil {
 					t.log(wErr.Error())
 					break
@@ -180,7 +183,7 @@ func (t *Terminal) StartSingle() error {
 			for {
 				c := <-t.stdinChan
 				_, wErr := bufStdin.WriteString(c + "\n")
-				t.stdinErr <- wErr
+
 				if wErr != nil {
 					t.log(wErr.Error())
 					break
@@ -195,7 +198,20 @@ func (t *Terminal) StartSingle() error {
 	}()
 
 	<-e
-	return t.process.Start()
+
+	sErr := t.process.Start()
+
+	if sErr != nil {
+		return sErr
+	}
+
+	go func() {
+		t.closeEvent <- t.process.Wait()
+		t.Running = false
+	}()
+
+	t.Running = true
+	return nil
 }
 
 func (t *Terminal) log(message string) {
@@ -208,8 +224,11 @@ func (t *Terminal) err(message string) {
 }
 
 func (t *Terminal) Send(command string) error {
+	if !t.Running {
+		return fmt.Errorf("Terminal is not running")
+	}
 	t.stdinChan <- command
-	return <-t.stdinErr
+	return nil
 }
 
 func (t *Terminal) GetOutputFile() *os.File {
@@ -222,20 +241,30 @@ func (t *Terminal) GetOutputFilePath() string {
 
 func (t *Terminal) Stop() error {
 	pgid, err := syscall.Getpgid(t.process.Process.Pid)
-	if err == nil {
-		syscall.Kill(-pgid, 15)
+	if err != nil {
+		return err
 	}
 
-	kErr := t.process.Wait()
-	t.stdout.Close()
-	t.stderr.Close()
-	return kErr
+	if kErr := syscall.Kill(-pgid, 15); kErr != nil {
+		return kErr
+	}
+
+	// kErr := t.process.Wait()
+
+	if t.stdout != nil {
+		t.stdout.Close()
+	}
+
+	if t.stderr != nil {
+		t.stderr.Close()
+	}
+
+	close(t.stdinChan)
+	t.Running = false
+	/* close(t.stdinErr) */
+	return nil
 }
 
-func (t *Terminal) Wait() error {
-	wErr := t.process.Wait()
-	t.stdout.Close()
-	t.stderr.Close()
-
-	return wErr
+func (t *Terminal) Wait() {
+	<-t.closeEvent
 }

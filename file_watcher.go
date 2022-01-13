@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ type FileWatcher struct {
 	started   bool
 	connect   bool
 	close     bool
+	watcher   *fsnotify.Watcher
 	eventChan chan bool
 }
 
@@ -41,33 +43,28 @@ func (fw *FileWatcher) Start() error {
 		return wErr
 	}
 
+	fw.watcher = watcher
+
 	log.Println("Started")
 	// done := make(chan bool)
 	go func() {
-		defer watcher.Close()
+		defer fw.Close()
 	E:
 		for {
 			select {
 			case event, ok := <-watcher.Events:
-				//log.Println("event:", event)
 				if !ok {
 					break E
 				}
 				if event.Op&fsnotify.Write == fsnotify.Write {
-					// if fw.connect {
-					// 	fw.eventChan <- true
-					// }
 					fw.eventChan <- true
-					//log.Println("modified file:", event.Name)
 				}
 			case _, ok := <-watcher.Errors:
-				// log.Println("error:", err)
 				if !ok {
 					break E
 				}
 			}
 		}
-		fw.Close()
 	}()
 
 	if err := watcher.Add(fw.path); err != nil {
@@ -81,8 +78,6 @@ read:
 	nRead, rErr := fw.file.Read(buf)
 
 	if rErr == io.EOF {
-		//log.Println("io.EOF")
-		//fw.connect = true
 		<-fw.eventChan
 		if !fw.close {
 			goto read
@@ -93,14 +88,19 @@ read:
 	return nRead, rErr
 }
 
-func (fw *FileWatcher) Close() {
+func (fw *FileWatcher) Close() error {
 	if !fw.close {
-		return
+		return nil
 	}
+
 	fw.close = true
-	select {
-	case fw.eventChan <- true:
-	default:
+	close(fw.eventChan)
+	wErr := fw.watcher.Close()
+	cErr := fw.file.Close()
+
+	if wErr != nil || cErr != nil {
+		return fmt.Errorf("watcher : %s, file %s", wErr, cErr)
 	}
-	fw.file.Close()
+
+	return nil
 }

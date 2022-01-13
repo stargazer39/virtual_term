@@ -10,14 +10,12 @@ import (
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
 type Server struct {
-	s           *gin.Engine
-	activeTerms map[string]*Terminal
-	// activeSessions map[string]string
+	s    *gin.Engine
+	tman *TermManager
 }
 
 type TerminalParams struct {
@@ -37,8 +35,8 @@ func NewServer() (*Server, error) {
 	s.Use(sessions.Sessions("defaultsession", store))
 
 	return &Server{
-		s:           s,
-		activeTerms: make(map[string]*Terminal),
+		s:    s,
+		tman: NewTermManager(),
 	}, nil
 }
 
@@ -47,7 +45,7 @@ func (server *Server) InitServer() {
 	s := server.s
 
 	s.Static("/static", "./static")
-	// Initialize websocket
+
 	wsUpgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true
@@ -91,15 +89,11 @@ func (server *Server) InitServer() {
 			return
 		}
 
-		termuuid := uuid.New()
-		terms := session.Get("terms").([]string)
+		uTids := session.Get("terms").([]string)
+		tId := server.tman.NewTerminal(params.Title, params.Params...)
 
-		term := NewTerminal(params.Title, params.Params...)
-		server.activeTerms[termuuid.String()] = term
-
-		terms = append(terms, termuuid.String())
-
-		session.Set("terms", terms)
+		uTids = append(uTids, tId)
+		session.Set("terms", uTids)
 
 		sErr := session.Save()
 
@@ -112,7 +106,7 @@ func (server *Server) InitServer() {
 		c.JSON(200, gin.H{
 			"success": true,
 			"message": modal.Success,
-			"uuid":    termuuid.String(),
+			"uuid":    tId,
 		})
 	})
 
@@ -122,13 +116,9 @@ func (server *Server) InitServer() {
 			return
 		}
 
-		terms := session.Get("terms").([]string)
+		uTids := session.Get("terms").([]string)
 
-		c.JSON(200, gin.H{
-			"error":   false,
-			"message": modal.Success,
-			"count":   terms,
-		})
+		c.JSON(200, modal.ActiveTerminals(uTids))
 	})
 
 	s.GET("/api/term/:id/start", func(c *gin.Context) {
@@ -153,9 +143,7 @@ func (server *Server) InitServer() {
 			return
 		}
 
-		thisTerm := server.activeTerms[id]
-
-		startErr := thisTerm.StartSingle()
+		startErr := server.tman.StartTerminal(id)
 
 		if startErr != nil {
 			c.JSON(400, modal.SendError(startErr))
@@ -187,9 +175,7 @@ func (server *Server) InitServer() {
 			return
 		}
 
-		thisTerm := server.activeTerms[id]
-
-		stopErr := thisTerm.Stop()
+		stopErr := server.tman.StopTerminal(id)
 
 		if stopErr != nil {
 			c.JSON(400, modal.SendError(stopErr))
@@ -221,8 +207,12 @@ func (server *Server) InitServer() {
 			return
 		}
 
-		thisTerm := server.activeTerms[id]
+		thisTerm, tErr := server.tman.GetTerm(id)
 
+		if tErr != nil {
+			log.Println(tErr)
+			return
+		}
 		// make a websocket
 		ws, wErr := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 
@@ -255,64 +245,6 @@ func (server *Server) InitServer() {
 		}
 
 	})
-
-	s.GET("/api/testsocket", func(c *gin.Context) {
-		// id := c.Param("id")
-
-		// session := isAuthorized(c)
-		// if session == nil {
-		// 	return
-		// }
-
-		// terms := session.Get("terms").([]string)
-
-		// found := false
-		// for _, val := range terms {
-		// 	if val == id {
-		// 		found = true
-		// 	}
-		// }
-
-		// if !found {
-		// 	c.JSON(400, modal.SendErrorMessage("Not found"))
-		// 	return
-		// }
-
-		// thisTerm := server.activeTerms[id]
-
-		// make a websocket
-		ws, wErr := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
-
-		if wErr != nil {
-			c.JSON(400, modal.SendError(wErr))
-		}
-
-		defer ws.Close()
-
-		// Get terminal output file
-
-		// start websocket
-		var com modal.WsCommand
-		var success = false
-
-		for {
-			if err := ws.ReadJSON(&com); err != nil {
-				log.Println(err)
-				break
-			}
-
-			switch com.Command {
-			case modal.OpenSocket:
-				success = acknowledgeSocket(&com, ws)
-			case modal.GetTerm:
-				// success = sendTermSocket(&com, ws, "test.txt")
-			}
-
-			if !success {
-				break
-			}
-		}
-	})
 }
 
 // Websocket handlers
@@ -338,7 +270,7 @@ func sendTermSocket(c *modal.WsCommand, ws *websocket.Conn, term *Terminal) bool
 	w.Start()
 
 	defer w.Close()
-	buffer := make([]byte, 8)
+	buffer := make([]byte, 1024)
 
 	go func() {
 		for {
@@ -359,13 +291,27 @@ func sendTermSocket(c *modal.WsCommand, ws *websocket.Conn, term *Terminal) bool
 		}
 	}()
 
+	// Handle process end event
+	go func() {
+		var m modal.WsCommand
+
+		m.Command = modal.StopTerm
+		m.Message = term.id.String()
+
+		<-term.closeEvent
+
+		if wErr = ws.WriteJSON(m); wErr != nil {
+			log.Println(wErr)
+		}
+	}()
+
 	var res modal.WsCommand
 	var cErr error = nil
 O:
 	for {
+
 		if err := ws.ReadJSON(&res); err != nil {
 			log.Println(err)
-			// t.Stop()
 			cErr = err
 			break
 		}
@@ -373,9 +319,18 @@ O:
 		switch res.Command {
 		case modal.StopTerm:
 			log.Println("Stop")
-			term.Stop()
-			w.Close()
-			// t.Stop()
+			sErr := term.Stop()
+
+			if sErr != nil {
+
+				res.Command = "t"
+				res.Message = sErr.Error()
+
+				if wErr = ws.WriteJSON(res); wErr != nil {
+					log.Println(wErr)
+					break
+				}
+			}
 			break O
 		case modal.ReciveCommand:
 			term.Send(res.Message)
@@ -405,3 +360,24 @@ func GenRandomBytes(size int) (blk []byte, err error) {
 	_, err = rand.Read(blk)
 	return
 }
+
+/* func proxy(c *gin.Context) {
+	remote, err := url.Parse("")
+	if err != nil {
+		panic(err)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(remote)
+	//Define the director func
+	//This is a good place to log, for example
+	proxy.Director = func(req *http.Request) {
+		req.Header = c.Request.Header
+		req.Host = remote.Host
+		req.URL.Scheme = remote.Scheme
+		req.URL.Host = remote.Host
+		// req.URL.Path = c.Param("proxyPath")
+	}
+
+	proxy.ServeHTTP(c.Writer, c.Request)
+}
+*/
